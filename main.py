@@ -8,8 +8,10 @@ Pipeline:
      Tiles are cached on disk, so the script resumes where it stopped (quota, Ctrl+C...).
   3. Rasterize the IRIS once per tile, then for each month accumulate NDVI sum / valid pixel
      count per IRIS, giving a pixel-weighted mean and the share of the IRIS not under clouds.
-  4. Write one CSV per month, and an HTML page (Leaflet) with year / month selectors and a
-     CSV export of the displayed month.
+  4. Write one CSV per month, and one per October-September year (mean of the months where the
+     IRIS is mostly cloud-free).
+  5. Build an HTML page (Leaflet) with year / period selectors (annual mean or one month) and a
+     CSV export of the displayed period.
 
 Usage:
   python main.py              download missing months, then rebuild the map
@@ -54,6 +56,7 @@ ROOT = Path(__file__).parent
 DATA_DIR = ROOT / "data"
 TILES_DIR = DATA_DIR / "ndvi_tiles_monthly"
 MONTHLY_DIR = DATA_DIR / "ndvi_monthly"
+ANNUAL_DIR = DATA_DIR / "ndvi_annual"
 IRIS_GPKG = next(DATA_DIR.rglob("iris.gpkg"))
 OUT_HTML = ROOT / "ndvi_iris_idf.html"
 
@@ -66,7 +69,9 @@ MAX_THREADS = 2  # the per-minute rate limit is the bottleneck, more threads onl
 
 NODATA = -32768
 NDVI_SCALE = 10_000  # NDVI stored as INT16 * 10000: half the processing units of FLOAT32
-MIN_COVERAGE = 0.5  # below this share of cloud-free pixels, an IRIS is shown as "cloudy"
+MIN_COVERAGE = 0.5  # below this share of cloud-free pixels, an IRIS is "cloudy" that month
+YEAR_START_MONTH = 10  # years run from October to September: 4 full years over the period
+MIN_MONTHS = 6  # display only: with fewer usable months in a year, an IRIS is shown as "no data"
 NDVI_COLOR_RANGE = (0.0, 0.8)  # fixed so that months can be compared
 
 EVALSCRIPT = f"""
@@ -117,6 +122,12 @@ def load_iris_idf():
 
 def all_months():
     return [str(p) for p in pd.period_range(FIRST_MONTH, LAST_MONTH, freq="M")]
+
+
+def year_of(month):
+    """Label 'AAAA-AAAA' of the October-September year containing the month 'AAAA-MM'."""
+    start = (pd.Period(month, freq="M") - (YEAR_START_MONTH - 1)).year
+    return f"{start}-{start + 1}"
 
 
 def tile_grid(region):
@@ -271,7 +282,34 @@ def load_monthly_stats(iris):
     return results
 
 
-def make_map(iris, monthly, out_html):
+def annual_stats(monthly):
+    """{year: DataFrame aligned on iris} for every year whose 12 months are computed.
+
+    ndvi_mean is the mean of the monthly means over the months where the IRIS is usable
+    (coverage >= MIN_COVERAGE), each month having the same weight; n_months counts those months.
+    """
+    by_year = {}
+    for month, df in monthly.items():
+        by_year.setdefault(year_of(month), []).append(df)
+    results = {}
+    for year, dfs in by_year.items():
+        if len(dfs) < 12:
+            continue
+        ndvi = pd.concat([df["ndvi_mean"].where(df["coverage"] >= MIN_COVERAGE) for df in dfs], axis=1)
+        results[year] = pd.DataFrame({
+            "ndvi_mean": ndvi.mean(axis=1).round(4),
+            "n_months": ndvi.notna().sum(axis=1),
+        })
+    return results
+
+
+def save_annual_stats(annual):
+    ANNUAL_DIR.mkdir(parents=True, exist_ok=True)
+    for year, df in annual.items():
+        df.to_csv(ANNUAL_DIR / f"ndvi_{year}.csv")
+
+
+def make_map(iris, monthly, annual, out_html):
     geo = iris[["code_iris", "nom_iris", "nom_commune", "geometry"]].copy()
     geo["geometry"] = geo.geometry.simplify(15).to_crs(4326)
     geo["geometry"] = shapely.transform(geo.geometry, lambda c: c.round(5))  # lighter HTML
@@ -296,10 +334,19 @@ def make_map(iris, monthly, out_html):
         for month, df in monthly.items()
         if df["n_pixels"].sum() > 0
     }
+    annual_data = {
+        year: {
+            "ndvi": ints((df["ndvi_mean"] * 1000).round()),
+            "nm": ints(df["n_months"]),  # usable months
+        }
+        for year, df in annual.items()
+    }
     meta = {
         "vmin": NDVI_COLOR_RANGE[0],
         "vmax": NDVI_COLOR_RANGE[1],
         "minCov": round(MIN_COVERAGE * 100),
+        "minMonths": MIN_MONTHS,
+        "yearStart": YEAR_START_MONTH,
         "resolution": RESOLUTION,
     }
 
@@ -310,10 +357,11 @@ def make_map(iris, monthly, out_html):
         HTML_TEMPLATE
         .replace("__GEO__", js({"type": "FeatureCollection", "features": features}))
         .replace("__DATA__", js(data))
+        .replace("__ANNUAL__", js(annual_data))
         .replace("__META__", js(meta))
     )
     out_html.write_text(html, encoding="utf-8")
-    print(f"Carte : {out_html} ({len(data)} mois disponibles)")
+    print(f"Carte : {out_html} ({len(data)} mois et {len(annual_data)} années disponibles)")
 
 
 HTML_TEMPLATE = """<!doctype html>
@@ -345,7 +393,8 @@ HTML_TEMPLATE = """<!doctype html>
 <div id="map"></div>
 <script>
 const GEO = __GEO__;
-const DATA = __DATA__;
+const DATA = __DATA__;      // by month "AAAA-MM"
+const ANNUAL = __ANNUAL__;  // by October-September year "AAAA-AAAA"
 const META = __META__;
 
 const MONTH_NAMES = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet",
@@ -373,29 +422,42 @@ function ign(layer, format) {
 const plan = ign("GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", "image/png").addTo(map);
 const ortho = ign("ORTHOIMAGERY.ORTHOPHOTOS", "image/jpeg");
 
-let current = months[months.length - 1];
+// The displayed period is a month key "AAAA-MM" or a year key "AAAA-AAAA"
+const isYear = key => key in ANNUAL;
+const record = key => ANNUAL[key] || DATA[key];
+const yearKeys = Object.keys(ANNUAL).sort();
+let current = yearKeys.length ? yearKeys[yearKeys.length - 1] : months[months.length - 1];
+
+function yearOf(month) {
+  const start = +month.slice(0, 4) - (+month.slice(5) < META.yearStart ? 1 : 0);
+  return start + "-" + (start + 1);
+}
 
 function usable(i) {
-  const d = DATA[current];
-  return !!d && d.ndvi[i] !== null && d.cov[i] >= META.minCov;
+  const d = record(current);
+  if (!d || d.ndvi[i] === null) return false;
+  return isYear(current) ? d.nm[i] >= META.minMonths : d.cov[i] >= META.minCov;
 }
 
 function style(feature) {
   const i = feature.properties.i;
   return {
-    fillColor: usable(i) ? ndviColor(DATA[current].ndvi[i] / 1000) : NO_DATA_COLOR,
+    fillColor: usable(i) ? ndviColor(record(current).ndvi[i] / 1000) : NO_DATA_COLOR,
     fillOpacity: usable(i) ? 0.75 : 0.45,
     color: "#555", weight: 0.3,
   };
 }
 
 function tooltip(p) {
-  const d = DATA[current];
+  const d = record(current);
   if (!d) return "<b>" + p.c + "</b> – " + p.n;
   const v = d.ndvi[p.i];
   const ndvi = v === null ? "–" : (v / 1000).toFixed(3);
-  return "<b>" + p.c + "</b> – " + p.n + "<br>Code IRIS : " + p.k +
-         "<br>NDVI moyen : " + ndvi + "<br>Pixels (" + META.resolution + " m) : " + d.px[p.i] +
+  const head = "<b>" + p.c + "</b> – " + p.n + "<br>Code IRIS : " + p.k;
+  if (isYear(current)) {
+    return head + "<br>NDVI moyen annuel : " + ndvi + "<br>Mois exploitables : " + d.nm[p.i] + " / 12";
+  }
+  return head + "<br>NDVI moyen : " + ndvi + "<br>Pixels (" + META.resolution + " m) : " + d.px[p.i] +
          "<br>Nuages : " + (100 - d.cov[p.i]) + " %";
 }
 
@@ -417,10 +479,10 @@ panel.onAdd = () => {
   const div = L.DomUtil.create("div", "panel");
   div.innerHTML =
     "<h1>NDVI moyen par IRIS – Île-de-France</h1>" +
-    "<label for='year'>Année</label><select id='year'></select> " +
-    "<label for='month'>Mois</label><select id='month'></select><br>" +
-    "<button id='export'>Exporter le mois en CSV</button> " +
-    "<button id='export-all'>Exporter tous les mois (ZIP)</button>" +
+    "<label for='year'>Année (oct.–sept.)</label><select id='year'></select><br>" +
+    "<label for='month'>Période</label><select id='month'></select><br>" +
+    "<button id='export'>Exporter la période en CSV</button> " +
+    "<button id='export-all'>Tout exporter (ZIP)</button>" +
     "<div class='info' id='info'></div>";
   L.DomEvent.disableClickPropagation(div);
   L.DomEvent.disableScrollPropagation(div);
@@ -430,34 +492,54 @@ panel.addTo(map);
 
 const yearSelect = document.getElementById("year");
 const monthSelect = document.getElementById("month");
-const years = [...new Set(months.map(m => m.slice(0, 4)))];
+const years = [...new Set(months.map(yearOf))];
 yearSelect.innerHTML = years.map(y => "<option>" + y + "</option>").join("");
 
+// "Moyenne annuelle", then the 12 months of the year, October first
 function fillMonths(year) {
-  monthSelect.innerHTML = MONTH_NAMES.map((name, k) => {
-    const key = year + "-" + String(k + 1).padStart(2, "0");
-    return "<option value='" + key + "'" + (DATA[key] ? "" : " disabled") + ">" + name + "</option>";
-  }).join("");
+  const options = ["<option value='" + year + "'" + (ANNUAL[year] ? "" : " disabled") +
+                   ">Moyenne annuelle</option>"];
+  for (let k = 0; k < 12; k++) {
+    const m = (META.yearStart - 1 + k) % 12;
+    const y = +year.slice(0, 4) + (META.yearStart - 1 + k >= 12 ? 1 : 0);
+    const key = y + "-" + String(m + 1).padStart(2, "0");
+    options.push("<option value='" + key + "'" + (DATA[key] ? "" : " disabled") + ">" +
+                 MONTH_NAMES[m] + " " + y + "</option>");
+  }
+  monthSelect.innerHTML = options.join("");
 }
 
-function show(month) {
-  current = month;
-  yearSelect.value = month.slice(0, 4);
+function show(key) {
+  current = key;
+  yearSelect.value = isYear(key) ? key : yearOf(key);
   fillMonths(yearSelect.value);
-  monthSelect.value = month;
+  monthSelect.value = key;
   irisLayer.setStyle(style);
   const n = GEO.features.filter(f => usable(f.properties.i)).length;
-  const cov = DATA[month].cov.reduce((a, b) => a + b, 0) / DATA[month].cov.length;
-  document.getElementById("info").innerHTML =
-    n + " / " + GEO.features.length + " IRIS exploitables · " + Math.round(100 - cov) +
-    " % de nuages en moyenne<br>Image Sentinel-2 la moins nuageuse du mois, " +
-    META.resolution + " m. En gris : plus de " + (100 - META.minCov) + " % de nuages sur l'IRIS.";
+  let text = n + " / " + GEO.features.length + " IRIS exploitables";
+  if (isYear(key)) {
+    text += "<br>Moyenne des NDVI mensuels d'octobre à septembre, sur les mois où l'IRIS a moins de " +
+      (100 - META.minCov) + " % de nuages. En gris : moins de " + META.minMonths + " mois exploitables.";
+  } else {
+    const cov = DATA[key].cov.reduce((a, b) => a + b, 0) / DATA[key].cov.length;
+    text += " · " + Math.round(100 - cov) + " % de nuages en moyenne<br>Image Sentinel-2 la moins " +
+      "nuageuse du mois, " + META.resolution + " m. En gris : plus de " + (100 - META.minCov) +
+      " % de nuages sur l'IRIS.";
+  }
+  document.getElementById("info").innerHTML = text;
 }
 
+// Changing year keeps the same kind of view: annual mean, or the same calendar month
 yearSelect.addEventListener("change", () => {
-  const inYear = months.filter(m => m.startsWith(yearSelect.value));
-  const sameMonth = yearSelect.value + current.slice(4);
-  show(DATA[sameMonth] ? sameMonth : inYear[inYear.length - 1]);
+  const year = yearSelect.value;
+  let target = year;
+  if (!isYear(current)) {
+    const sameMonth = (+current.slice(5) < META.yearStart ? +year.slice(5) : +year.slice(0, 4)) +
+                      current.slice(4);
+    if (DATA[sameMonth]) target = sameMonth;
+  }
+  const inYear = months.filter(m => yearOf(m) === year);
+  show(record(target) ? target : inYear[inYear.length - 1]);
 });
 monthSelect.addEventListener("change", () => show(monthSelect.value));
 
@@ -466,14 +548,18 @@ function csvField(value) {
   return /[;"\\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 
-const CSV_HEADER = ["commune", "iris", "code_iris", "ndvi_moyen", "nombre_pixels", "nuages_pct"];
+function csvHeader(key) {
+  return ["commune", "iris", "code_iris", "ndvi_moyen",
+          ...(isYear(key) ? ["mois_exploitables"] : ["nombre_pixels", "nuages_pct"])];
+}
 
-function csvRows(month) {
-  const d = DATA[month];
+function csvRows(key) {
+  const d = record(key);
   return GEO.features.map(f => {
     const p = f.properties, v = d.ndvi[p.i];
     // French Excel conventions: ";" separator, decimal comma
-    return [p.c, p.n, p.k, v === null ? "" : (v / 1000).toFixed(3).replace(".", ","), d.px[p.i], 100 - d.cov[p.i]];
+    const ndvi = v === null ? "" : (v / 1000).toFixed(3).replace(".", ",");
+    return [p.c, p.n, p.k, ndvi, ...(isYear(key) ? [d.nm[p.i]] : [d.px[p.i], 100 - d.cov[p.i]])];
   });
 }
 
@@ -491,29 +577,34 @@ function save(blob, filename) {
 }
 
 document.getElementById("export").addEventListener("click", () => {
-  const csv = toCsv([CSV_HEADER, ...csvRows(current)]);
+  const csv = toCsv([csvHeader(current), ...csvRows(current)]);
   save(new Blob([csv], { type: "text/csv;charset=utf-8" }), "ndvi_iris_idf_" + current + ".csv");
 });
 
-// One CSV per month, plus all months stacked in a single file with a "mois" column
+// One CSV per month and per year, plus all months (resp. years) stacked in a single file
+// with a "mois" (resp. "annee") column
 document.getElementById("export-all").addEventListener("click", async () => {
   const button = document.getElementById("export-all");
   button.disabled = true;
   button.textContent = "Préparation du ZIP…";
   try {
     const zip = new JSZip();
-    const all = [["mois", ...CSV_HEADER]];
-    for (const month of months) {
-      const rows = csvRows(month);
-      zip.file("ndvi_iris_idf_" + month + ".csv", toCsv([CSV_HEADER, ...rows]));
-      for (const r of rows) all.push([month, ...r]);
+    for (const [keys, column, stackedName] of [[months, "mois", "tous_les_mois"],
+                                               [yearKeys, "annee", "toutes_les_annees"]]) {
+      if (!keys.length) continue;
+      const stacked = [[column, ...csvHeader(keys[0])]];
+      for (const key of keys) {
+        const rows = csvRows(key);
+        zip.file("ndvi_iris_idf_" + key + ".csv", toCsv([csvHeader(key), ...rows]));
+        for (const r of rows) stacked.push([key, ...r]);
+      }
+      zip.file("ndvi_iris_idf_" + stackedName + ".csv", toCsv(stacked));
     }
-    zip.file("ndvi_iris_idf_tous_les_mois.csv", toCsv(all));
     const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
     save(blob, "ndvi_iris_idf_" + months[0] + "_" + months[months.length - 1] + ".zip");
   } finally {
     button.disabled = false;
-    button.textContent = "Exporter tous les mois (ZIP)";
+    button.textContent = "Tout exporter (ZIP)";
   }
 });
 
@@ -543,7 +634,10 @@ def main():
     print(f"{len(iris)} IRIS en Île-de-France")
     if "--map-only" not in sys.argv:
         update_monthly_stats(iris)
-    make_map(iris, load_monthly_stats(iris), OUT_HTML)
+    monthly = load_monthly_stats(iris)
+    annual = annual_stats(monthly)
+    save_annual_stats(annual)
+    make_map(iris, monthly, annual, OUT_HTML)
 
 
 if __name__ == "__main__":

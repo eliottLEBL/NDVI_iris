@@ -1,11 +1,11 @@
-# NDVI mensuel par IRIS en Île-de-France
+# NDVI mensuel et annuel par IRIS en Île-de-France
 
-Calcule, pour chaque mois d'octobre 2022 à septembre 2026, le **NDVI moyen de chaque IRIS d'Île-de-France** (5 265 IRIS) à partir des images satellite **Sentinel-2** du programme Copernicus, puis produit une **carte HTML interactive** :
+Calcule, pour chaque mois d'octobre 2022 à septembre 2026, le **NDVI moyen de chaque IRIS d'Île-de-France** (5 265 IRIS) à partir des images satellite **Sentinel-2** du programme Copernicus, en déduit **une valeur par IRIS et par année** (années d'octobre à septembre : 2022-2023 à 2025-2026), puis produit une **carte HTML interactive** :
 
-- choix de l'**année** et du **mois** affichés via deux listes déroulantes ;
+- choix de l'**année** (octobre → septembre) et de la **période** affichée : « Moyenne annuelle » (affichée par défaut) ou l'un des 12 mois ;
 - couleur de chaque IRIS selon son NDVI moyen (rouge = peu de végétation, vert = beaucoup) ;
-- info-bulle au survol : commune, IRIS, code IRIS, NDVI moyen, nombre de pixels, % de nuages ;
-- bouton **« Exporter le mois en CSV »** qui télécharge les données du mois affiché.
+- info-bulle au survol : commune, IRIS, code IRIS, NDVI moyen, puis nombre de mois exploitables (vue annuelle) ou nombre de pixels et % de nuages (vue mensuelle) ;
+- bouton **« Exporter la période en CSV »** qui télécharge les données affichées, et **« Tout exporter (ZIP) »** pour tous les mois et toutes les années.
 
 ---
 
@@ -19,7 +19,7 @@ pip install sentinelhub geopandas rasterio pandas numpy shapely
 
 **Contours des IRIS** (non inclus dans le dépôt : 167 Mo, au-delà de la limite de GitHub). Télécharger **CONTOURS-IRIS®, édition 2026, format GeoPackage, Lambert-93, France métropolitaine** sur <https://geoservices.ign.fr/contoursiris>, puis décompresser l'archive dans `data/`. Le script cherche automatiquement le fichier `iris.gpkg` dans ce dossier et ses sous-dossiers.
 
-**Déjà inclus dans le dépôt** : les résultats des 48 mois (`data/ndvi_monthly/`) et la carte (`ndvi_iris_idf.html`). Il suffit donc des contours IRIS pour régénérer la carte avec `python main.py --map-only`, sans identifiants Copernicus ni téléchargement. Les tuiles Sentinel-2 (~3 Go) ne sont pas versionnées ; `python main.py` les retélécharge si besoin.
+**Déjà inclus dans le dépôt** : les résultats des 48 mois (`data/ndvi_monthly/`) et des 4 années (`data/ndvi_annual/`) et la carte (`ndvi_iris_idf.html`). Il suffit donc des contours IRIS pour régénérer la carte avec `python main.py --map-only`, sans identifiants Copernicus ni téléchargement. Les tuiles Sentinel-2 (~3 Go) ne sont pas versionnées ; `python main.py` les retélécharge si besoin.
 
 ## 2. Identifiants Copernicus
 
@@ -63,6 +63,7 @@ Puis ouvrir **`ndvi_iris_idf.html`** dans un navigateur (double-clic, pas besoin
 |---|---|
 | `ndvi_iris_idf.html` | La carte interactive (autonome, ~8 Mo). |
 | `data/ndvi_monthly/ndvi_AAAA-MM.csv` | Résultats d'un mois pour tous les IRIS (§ 5.2). |
+| `data/ndvi_annual/ndvi_AAAA-AAAA.csv` | Résultats d'une année (octobre → septembre) pour tous les IRIS (§ 5.3). Recalculés à chaque génération de la carte. |
 | `data/ndvi_tiles_monthly/AAAA-MM/ndvi_X_Y.tif` | Rasters NDVI téléchargés (GeoTIFF Lambert-93, 20 m), un par tuile et par mois. Ouvrables dans QGIS. |
 
 ---
@@ -78,7 +79,9 @@ Puis ouvrir **`ndvi_iris_idf.html`** dans un navigateur (double-clic, pas besoin
 | `MAX_THREADS` | `4` | Nombre de tuiles téléchargées en parallèle. |
 | `NODATA` | `-32768` | Valeur des pixels exclus (nuages, ombres…) dans les GeoTIFF. |
 | `NDVI_SCALE` | `10000` | Facteur d'échelle : le NDVI est stocké en entier `NDVI × 10 000` (deux fois moins coûteux en quota qu'un nombre décimal). |
-| `MIN_COVERAGE` | `0.5` | **Affichage uniquement** : un IRIS dont moins de 50 % de la surface est visible (donc plus de 50 % de nuages) apparaît en gris sur la carte. N'affecte pas les CSV. |
+| `MIN_COVERAGE` | `0.5` | Un IRIS dont moins de 50 % de la surface est visible (donc plus de 50 % de nuages) un mois donné apparaît en gris sur la carte de ce mois, et ce mois est écarté de sa moyenne annuelle. N'affecte pas les CSV mensuels. |
+| `YEAR_START_MONTH` | `10` | Premier mois d'une année (octobre) : la période contient ainsi 4 années complètes de 12 mois. |
+| `MIN_MONTHS` | `6` | **Affichage uniquement** : en vue annuelle, un IRIS ayant moins de 6 mois exploitables dans l'année apparaît en gris. N'affecte pas les CSV. |
 | `NDVI_COLOR_RANGE` | `(0.0, 0.8)` | Bornes de l'échelle de couleurs, identiques pour tous les mois afin de pouvoir les comparer. Les valeurs hors bornes prennent la couleur de la borne. |
 
 Modifier la période ou la résolution crée de nouveaux calculs ; pour repartir de zéro après un changement de `RESOLUTION` ou `TILE_SIZE`, supprimer `data/ndvi_tiles_monthly/` et `data/ndvi_monthly/`.
@@ -134,11 +137,27 @@ Notations, pour un IRIS donné et un mois donné :
 | `n_pixels` | `N_valides` | Nombre de pixels de 20 m (400 m² chacun) ayant servi au calcul. |
 | `coverage` | `N_valides / N_total` | Part de l'IRIS visible (non masquée), entre 0 et 1. Arrondi à 3 décimales. |
 
-### 5.3 Dans le CSV exporté depuis la carte
+### 5.3 Valeur annuelle (fichiers `data/ndvi_annual/ndvi_AAAA-AAAA.csv`)
 
-Le bouton **« Exporter le mois en CSV »** télécharge `ndvi_iris_idf_AAAA-MM.csv` pour le mois affiché, avec une ligne par IRIS (les 5 265, y compris ceux en gris sur la carte).
+Une année va d'**octobre à septembre** (`2022-2023` = octobre 2022 → septembre 2023). Elle n'est calculée que si ses 12 mois le sont.
+
+Pour un IRIS donné, un mois est **exploitable** si `ndvi_mean` n'est pas vide et `coverage ≥ MIN_COVERAGE` (au moins 50 % de l'IRIS visible).
+
+| Colonne | Calcul | Signification |
+|---|---|---|
+| `code_iris` | — | Code IRIS INSEE. |
+| `ndvi_mean` | moyenne des `ndvi_mean` mensuels des mois exploitables | NDVI moyen de l'année, **chaque mois exploitable ayant le même poids** (quelle que soit sa couverture nuageuse). Vide si aucun mois exploitable. Arrondi à 4 décimales. |
+| `n_months` | nombre de mois exploitables | Entre 0 et 12. |
+
+Les mois non exploitables sont simplement ignorés, sans interpolation : comme ce sont surtout des mois d'automne-hiver (nuages), où le NDVI est plus bas, une valeur annuelle calculée sur peu de mois tend à être **surestimée**. Sur 2022-2026, chaque IRIS a entre 4 et 12 mois exploitables par an (médiane 8 à 11 selon l'année).
+
+### 5.4 Dans les CSV exportés depuis la carte
+
+Le bouton **« Exporter la période en CSV »** télécharge `ndvi_iris_idf_AAAA-MM.csv` (mois) ou `ndvi_iris_idf_AAAA-AAAA.csv` (année) pour la période affichée, avec une ligne par IRIS (les 5 265, y compris ceux en gris sur la carte). Le bouton **« Tout exporter (ZIP) »** regroupe tous ces fichiers, plus `ndvi_iris_idf_tous_les_mois.csv` (colonne `mois` en tête) et `ndvi_iris_idf_toutes_les_annees.csv` (colonne `annee` en tête).
 
 Format Excel français : séparateur `;`, virgule décimale, encodage UTF-8.
+
+Fichiers mensuels :
 
 | Colonne | Calcul | Signification |
 |---|---|---|
@@ -151,15 +170,27 @@ Format Excel français : séparateur `;`, virgule décimale, encodage UTF-8.
 
 Le `ndvi_moyen` est fourni quel que soit `nuages_pct` : c'est à l'utilisateur de choisir son seuil (par ex. ne garder que `nuages_pct ≤ 30`). Plus `nuages_pct` est élevé, moins la moyenne est représentative de l'ensemble de l'IRIS.
 
-### 5.4 Sur la carte
+Fichiers annuels :
+
+| Colonne | Calcul | Signification |
+|---|---|---|
+| `commune`, `iris`, `code_iris` | — | Comme ci-dessus. |
+| `ndvi_moyen` | `ndvi_mean` annuel (§ 5.3) arrondi à 3 décimales | NDVI moyen de l'année sur les mois exploitables. Vide si aucun. |
+| `mois_exploitables` | `n_months` | Nombre de mois (sur 12) ayant servi au calcul. |
+
+Le `ndvi_moyen` annuel est fourni quel que soit `mois_exploitables` : à l'utilisateur de choisir son seuil.
+
+### 5.5 Sur la carte
 
 | Élément | Calcul |
 |---|---|
-| Couleur d'un IRIS | `ndvi_mean` placé sur l'échelle rouge → jaune → vert entre `NDVI_COLOR_RANGE` (0 et 0,8). |
-| IRIS en gris | `ndvi_mean` vide, ou `coverage < MIN_COVERAGE` (plus de 50 % de nuages). |
-| « IRIS exploitables » | Nombre d'IRIS non gris pour le mois affiché. |
-| « % de nuages en moyenne » | Moyenne simple de `nuages_pct` sur tous les IRIS (chaque IRIS compte pour un, quelle que soit sa taille). |
-| Mois grisé dans la liste | Mois pas encore calculé, ou sans aucun pixel valide. |
+| Couleur d'un IRIS | `ndvi_mean` (du mois ou de l'année) placé sur l'échelle rouge → jaune → vert entre `NDVI_COLOR_RANGE` (0 et 0,8). |
+| IRIS en gris (vue mensuelle) | `ndvi_mean` vide, ou `coverage < MIN_COVERAGE` (plus de 50 % de nuages). |
+| IRIS en gris (vue annuelle) | `ndvi_mean` vide, ou `n_months < MIN_MONTHS` (moins de 6 mois exploitables). |
+| « IRIS exploitables » | Nombre d'IRIS non gris pour la période affichée. |
+| « % de nuages en moyenne » (vue mensuelle) | Moyenne simple de `nuages_pct` sur tous les IRIS (chaque IRIS compte pour un, quelle que soit sa taille). |
+| Période grisée dans la liste | Mois pas encore calculé ou sans aucun pixel valide ; année dont les 12 mois ne sont pas tous calculés. |
+| Changement d'année | Garde le type de vue : moyenne annuelle → moyenne annuelle, un mois → le même mois de l'autre année. |
 
 ---
 
@@ -173,7 +204,8 @@ Le `ndvi_moyen` est fourni quel que soit `nuages_pct` : c'est à l'utilisateur d
 | `download_month()` | Télécharge les tuiles manquantes d'un mois (en parallèle) et les enregistre en GeoTIFF. |
 | `month_stats()` | Calcule `ndvi_mean`, `n_pixels` et `coverage` par IRIS en croisant les tuiles NDVI et les grilles d'IRIS. |
 | `update_monthly_stats()` | Boucle sur les mois non encore calculés ; s'arrête proprement en cas d'erreur de quota. |
-| `make_map()` | Assemble contours simplifiés (tolérance 15 m) et résultats mensuels dans la page HTML (Leaflet, fonds de carte IGN). |
+| `annual_stats()`, `save_annual_stats()` | Calculent les valeurs annuelles à partir des résultats mensuels (§ 5.3) et les enregistrent dans `data/ndvi_annual/`. |
+| `make_map()` | Assemble contours simplifiés (tolérance 15 m), résultats mensuels et annuels dans la page HTML (Leaflet, fonds de carte IGN). |
 
 Le calcul du NDVI et le masquage des nuages sont faits **côté serveur** par Sentinel Hub (script `EVALSCRIPT` dans `main.py`) ; seules les moyennes par IRIS sont calculées localement.
 
@@ -198,6 +230,7 @@ Quota gratuit (compte Copernicus General User) : 10 000 PU et 10 000 requêtes p
 ## 8. Limites à connaître
 
 - **Nuages** : un satellite optique ne voit pas à travers les nuages. En hiver, de nombreux IRIS peuvent avoir un `nuages_pct` élevé. Pistes d'amélioration : combiner toutes les images du mois (plus coûteux en quota) ou interpoler entre les mois voisins.
+- **Moyenne annuelle et saisons** : les mois nuageux, surtout en hiver, sont écartés de la moyenne annuelle d'un IRIS ; les années ou IRIS ayant peu de mois exploitables ont donc une moyenne tirée vers le NDVI estival (voir `mois_exploitables`).
 - **Une seule date par mois** : la valeur d'un mois reflète l'état de la végétation à la date de la scène retenue, qui peut varier d'un pixel à l'autre si plusieurs scènes sont nécessaires pour couvrir la région.
 - **Contours fixes** : les contours IRIS de l'édition 2026 sont utilisés pour toutes les années.
 - **Pixels en bordure** : un pixel à cheval sur deux IRIS est attribué entièrement à celui qui contient son centre ; l'effet est négligeable sauf pour les très petits IRIS (voir `nombre_pixels`).
