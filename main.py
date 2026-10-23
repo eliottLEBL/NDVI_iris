@@ -61,9 +61,9 @@ IRIS_GPKG = next(DATA_DIR.rglob("iris.gpkg"))
 OUT_HTML = ROOT / "ndvi_iris_idf.html"
 
 IDF_DEPARTEMENTS = ("75", "77", "78", "91", "92", "93", "94", "95")
-FIRST_MONTH = "2022-10"
+FIRST_MONTH = "2017-10"  # Sentinel-2B in orbit since mid-2017: 5-day revisit from here on
 LAST_MONTH = "2026-09"
-RESOLUTION = 20  # m: ~8 400 PU for 4 years, at least ~22 px for the smallest IRIS
+RESOLUTION = 20  # m: ~175 PU per month (~18 900 PU for 9 years), at least ~22 px for the smallest IRIS
 TILE_SIZE = 20_000  # m -> 1000 x 1000 px per request
 MAX_THREADS = 2  # the per-minute rate limit is the bottleneck, more threads only cause more retries
 

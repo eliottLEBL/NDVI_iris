@@ -1,6 +1,6 @@
 # NDVI mensuel et annuel par IRIS en Île-de-France
 
-Calcule, pour chaque mois d'octobre 2022 à septembre 2026, le **NDVI moyen de chaque IRIS d'Île-de-France** (5 265 IRIS) à partir des images satellite **Sentinel-2** du programme Copernicus, en déduit **une valeur par IRIS et par année** (années d'octobre à septembre : 2022-2023 à 2025-2026), puis produit une **carte HTML interactive** :
+Calcule, pour chaque mois d'octobre 2017 à septembre 2026, le **NDVI moyen de chaque IRIS d'Île-de-France** (5 265 IRIS) à partir des images satellite **Sentinel-2** du programme Copernicus, en déduit **une valeur par IRIS et par année** (années d'octobre à septembre : 2017-2018 à 2025-2026), puis produit une **carte HTML interactive** :
 
 - choix de l'**année** (octobre → septembre) et de la **période** affichée : « Moyenne annuelle » (affichée par défaut) ou l'un des 12 mois ;
 - couleur de chaque IRIS selon son NDVI moyen (rouge = peu de végétation, vert = beaucoup) ;
@@ -55,7 +55,7 @@ Puis ouvrir **`ndvi_iris_idf.html`** dans un navigateur (double-clic, pas besoin
 
 **Reprise automatique.** Chaque tuile téléchargée et chaque mois calculé sont enregistrés sur le disque. Si le script s'arrête (quota atteint, coupure réseau, Ctrl+C), il suffit de le relancer : il reprend là où il s'était arrêté sans rien retélécharger. Les mois déjà calculés sont visibles sur la carte, les autres sont grisés dans la liste.
 
-**Durée et quota.** Une exécution complète représente environ 2 200 requêtes et ~8 400 unités de traitement (voir § 7), soit de l'ordre d'une heure et un peu moins que le quota gratuit mensuel (10 000 unités, remis à zéro le 1er de chaque mois).
+**Durée et quota.** Une exécution complète représente environ 5 000 requêtes et ~18 900 unités de traitement (voir § 7), soit quelques heures et près de deux fois le quota gratuit mensuel (10 000 unités, remis à zéro le 1er de chaque mois) : relancer le script le mois suivant pour terminer.
 
 ### Fichiers produits
 
@@ -73,7 +73,7 @@ Puis ouvrir **`ndvi_iris_idf.html`** dans un navigateur (double-clic, pas besoin
 | Variable | Valeur | Signification |
 |---|---|---|
 | `IDF_DEPARTEMENTS` | `75, 77, 78, 91, 92, 93, 94, 95` | Départements retenus (filtre sur les 2 premiers caractères de `code_insee`). |
-| `FIRST_MONTH`, `LAST_MONTH` | `2022-10`, `2026-09` | Période traitée (bornes incluses), au format `AAAA-MM`. |
+| `FIRST_MONTH`, `LAST_MONTH` | `2017-10`, `2026-09` | Période traitée (bornes incluses), au format `AAAA-MM`. |
 | `RESOLUTION` | `20` | Taille d'un pixel en mètres. |
 | `TILE_SIZE` | `20000` | Côté d'une tuile de téléchargement en mètres (20 km → 1 000 × 1 000 pixels à 20 m). |
 | `MAX_THREADS` | `4` | Nombre de tuiles téléchargées en parallèle. |
@@ -222,10 +222,10 @@ Ici : 1 000 × 1 000 pixels, 3 bandes (`B04`, `B08`, `SCL` ; `dataMask` est grat
 ```
 1 000 000 / 262 144 × 1 × 1 ≈ 3,8 PU par tuile
 × 46 tuiles ≈ 175 PU par mois
-× 48 mois  ≈ 8 400 PU
+× 108 mois ≈ 18 900 PU
 ```
 
-Quota gratuit (compte Copernicus General User) : 10 000 PU et 10 000 requêtes par mois. À 10 m de résolution le coût serait multiplié par 4 (~33 700 PU).
+Quota gratuit (compte Copernicus General User) : 10 000 PU et 10 000 requêtes par mois : la période complète demande donc deux mois de quota (le script reprend tout seul). À 10 m de résolution le coût serait multiplié par 4 (~75 600 PU).
 
 ## 8. Limites à connaître
 
